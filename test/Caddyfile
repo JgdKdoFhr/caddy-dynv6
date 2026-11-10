@@ -1,0 +1,7 @@
+# Used by the build to check that the image loads a config with the dynv6 provider.
+test.example.dynv6.net {
+	tls {
+		dns dynv6 {env.DYNV6_TOKEN}
+	}
+	respond "ok"
+}

@@ -1,0 +1,120 @@
+name: build
+
+# Builds and tests the image on every pull request and push. On main it pushes
+# ghcr.io/<owner>/caddy-dynv6:latest and :sha-<commit>; when the image contains a
+# Caddy version that has no release here yet, it also pushes :<version> and
+# :<major>.<minor> and creates the GitHub release v<version>.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # tag and release for a new Caddy version
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build test image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          tags: caddy-dynv6:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Test
+        id: test
+        run: |
+          img=caddy-dynv6:test
+          binary=$(docker run --rm "$img" caddy version | cut -d' ' -f1)
+          base=$(docker run --rm "$img" sh -c 'echo "$CADDY_VERSION"')
+          echo "caddy binary $binary, runtime image $base"
+          if [ "$binary" != "$base" ]; then
+            echo "::error::the binary is Caddy $binary but the runtime image is $base: update both FROM lines to the same version"
+            exit 1
+          fi
+          modules=$(docker run --rm "$img" caddy list-modules)
+          if ! grep -qx 'dns.providers.dynv6' <<< "$modules"; then
+            echo "::error::module dns.providers.dynv6 is missing"
+            exit 1
+          fi
+          docker run --rm -e DYNV6_TOKEN=dummy -v "$PWD/test/Caddyfile:/etc/caddy/Caddyfile:ro" "$img" \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          echo "version=${binary#v}" >> "$GITHUB_OUTPUT"
+
+      - name: New Caddy version?
+        id: release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.test.outputs.version }}
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$VERSION' is not a version like 2.11.9"
+            exit 1
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" --silent 2>/dev/null; then
+            echo "v$VERSION is released already: pushing only latest and sha-*"
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new release: v$VERSION"
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}},value=${{ steps.test.outputs.version }},enable=${{ steps.release.outputs.new == 'true' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.test.outputs.version }},enable=${{ steps.release.outputs.new == 'true' }}
+            type=sha
+
+      - if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: GitHub release
+        if: steps.release.outputs.new == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.test.outputs.version }}
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: |
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Caddy $VERSION with dynv6" \
+            --notes "Image: \`$IMAGE:$VERSION\` · Caddy release notes: https://github.com/caddyserver/caddy/releases/tag/v$VERSION"
