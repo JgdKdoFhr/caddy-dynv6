@@ -4,7 +4,7 @@
 # The builder compiles the Caddy version it ships (its CADDY_VERSION), cross-compiled
 # for the target platform, so no emulation is needed. The build checks that the
 # binary and the runtime image are the same Caddy version.
-FROM --platform=$BUILDPLATFORM caddy:2.11.9-builder@sha256:f9beaa5ddbe7df6f26ebbcf9cbf44e05a1917b9bba464f0c3229038d7e2e6e13 AS builder
+FROM --platform=$BUILDPLATFORM caddy:2.11.9-builder@sha256:cda07fe9d82728c7ac44d844306d435e98131423dc7b114f05a8a8ecfff94707 AS builder
 
 ARG TARGETOS TARGETARCH TARGETVARIANT
 # caddy-dns/dynv6 has no releases, so it's pinned to a commit. Update it by hand (see README).
